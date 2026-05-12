@@ -1,0 +1,113 @@
+name: Downloader To ParsPack
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_url:
+        description: 'Direct file URL'
+        required: true
+        type: string
+
+      zip_password:
+        description: '7z password (optional)'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install packages
+        run: |
+          sudo apt update
+          sudo apt install -y p7zip-full unzip curl
+
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+
+          unzip awscliv2.zip
+
+          sudo ./aws/install
+
+      - name: Create work folder
+        run: mkdir -p work
+
+      - name: Download file
+        id: dl
+        run: |
+          URL="${{ inputs.file_url }}"
+
+          FILE=$(basename "${URL%%\?*}")
+
+          if [[ -z "$FILE" || "$FILE" == "/" ]]; then
+            FILE="download.bin"
+          fi
+
+          FILE=$(echo "$FILE" | tr ' ' '_')
+
+          curl -L \
+            --fail \
+            --retry 5 \
+            --retry-delay 5 \
+            -o "work/$FILE" \
+            "$URL"
+
+          echo "file=$FILE" >> $GITHUB_OUTPUT
+
+      - name: Archive file
+        run: |
+          FILE="${{ steps.dl.outputs.file }}"
+          PASS="${{ inputs.zip_password }}"
+
+          BASE="${FILE%.*}"
+
+          cd work
+
+          if [[ -n "$PASS" ]]; then
+            7z a \
+              -p"$PASS" \
+              -mhe=on \
+              -mx=1 \
+              -v85m \
+              "${BASE}.7z" \
+              "$FILE"
+          else
+            7z a \
+              -mx=1 \
+              -v85m \
+              "${BASE}.7z" \
+              "$FILE"
+          fi
+
+          rm -f "$FILE"
+
+      - name: Configure AWS CLI
+        run: |
+          mkdir -p ~/.aws
+
+          cat > ~/.aws/credentials <<EOF
+          [default]
+          aws_access_key_id=${{ secrets.S3_ACCESS_KEY }}
+          aws_secret_access_key=${{ secrets.S3_SECRET_KEY }}
+          EOF
+
+          cat > ~/.aws/config <<EOF
+          [default]
+          region=us-east-1
+          output=json
+          EOF
+
+      - name: Upload to ParsPack
+        run: |
+          aws s3 cp work/ \
+            s3://${{ secrets.S3_BUCKET }}/ \
+            --recursive \
+            --endpoint-url "https://${{ secrets.S3_ENDPOINT }}"
+
+      - name: Show uploaded files
+        run: |
+          aws s3 ls \
+            s3://${{ secrets.S3_BUCKET }}/ \
+            --recursive \
+            --endpoint-url "https://${{ secrets.S3_ENDPOINT }}"
